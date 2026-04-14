@@ -46,7 +46,6 @@ TARGET_FIELDS = [
     "nombre_contratista",
     "numero_documento_contratista",
     "obligaciones_especificas",
-    "nombre_supervisor",
 ]
 
 
@@ -116,18 +115,6 @@ def search_first(patterns: List[str], text: str, flags: int = re.IGNORECASE | re
         if match:
             return match
     return None
-
-
-
-def looks_like_person_name(value: str) -> bool:
-    if not value:
-        return False
-    value = re.sub(r"\s+", " ", value).strip(" ,.;:\n\t")
-    words = [w for w in value.split() if w]
-    if len(words) < 2:
-        return False
-    upper_words = sum(1 for w in words if re.fullmatch(r"[A-ZÁÉÍÓÚÑ]+(?:[-'][A-ZÁÉÍÓÚÑ]+)?", w))
-    return upper_words >= min(2, len(words))
 
 
 
@@ -316,24 +303,6 @@ def extract_obligaciones_especificas(text: str) -> str:
 
 
 
-def extract_supervisor_name(text: str) -> str:
-    patterns = [
-        r"(?:la\s+)?supervisi[óo]n\s+(?:del\s+presente\s+contrato|contractual)?\s*(?:ser[áa]\s+ejercida|estar[áa]\s+a\s+cargo|corresponder[áa])\s+por\s+([^\n\.]+)",
-        r"supervisor(?:a)?\s+del\s+contrato\s*(?:ser[áa]|es|:)?\s*([^\n\.]+)",
-        r"la\s+supervisi[óo]n\s+ser[áa]\s+ejercida\s+por\s+([^\n\.]+)",
-    ]
-
-    m = search_first(patterns, text)
-    if not m:
-        return ""
-
-    value = m.group(1)
-    value = re.split(r";|,\s*quien\s+|,\s*o\s+por\s+quien|\s+o\s+por\s+quien", value, maxsplit=1, flags=re.IGNORECASE)[0]
-    value = re.sub(r"\s+", " ", value).strip(" ,.;:\n\t")
-    value = re.sub(r"^(el|la|los|las)\s+", "", value, flags=re.IGNORECASE)
-    return value
-
-
 # =========================
 # Extracción con IA
 # =========================
@@ -347,22 +316,13 @@ def get_openai_client(api_key: Optional[str]) -> Optional[OpenAI]:
 
 
 
-def build_focus_context(text: str, obligaciones_regla: str, supervisor_regla: str) -> str:
+def build_focus_context(text: str, obligaciones_regla: str) -> str:
     parts = []
     header = cut_text(text, 12000)
     parts.append("=== INICIO DEL CONTRATO / CONTEXTO GENERAL ===\n" + header)
 
     if obligaciones_regla:
         parts.append("=== BLOQUE DETECTADO DE OBLIGACIONES ESPECÍFICAS ===\n" + cut_text(obligaciones_regla, 8000))
-
-    if supervisor_regla:
-        parts.append("=== CANDIDATO DE SUPERVISIÓN DETECTADO ===\n" + supervisor_regla)
-
-    m = re.search(r"supervisi[óo]n", text, re.IGNORECASE)
-    if m:
-        start = max(0, m.start() - 1000)
-        end = min(len(text), m.start() + 2500)
-        parts.append("=== CONTEXTO DE SUPERVISIÓN ===\n" + text[start:end])
 
     return "\n\n".join(parts)
 
@@ -372,7 +332,6 @@ def extract_contract_fields_raw(client: OpenAI, text: str, filename: str, rule_c
     focus_text = build_focus_context(
         text=text,
         obligaciones_regla=rule_candidates.get("obligaciones_especificas", ""),
-        supervisor_regla=rule_candidates.get("nombre_supervisor", ""),
     )
 
     prompt = f"""
@@ -382,15 +341,13 @@ A partir del siguiente contrato en español, extrae SOLO estos campos y devuelve
 - nombre_contratista
 - numero_documento_contratista
 - obligaciones_especificas
-- nombre_supervisor
 
 Reglas obligatorias:
 1. No inventes datos.
 2. Si un campo no aparece claramente, devuelve "".
 3. numero_documento_contratista debe quedar SOLO con dígitos.
 4. obligaciones_especificas debe devolver el bloque textual de obligaciones específicas del contratista; conserva el contenido sustancial del contrato y no resumas.
-5. nombre_supervisor debe devolver el nombre de la persona supervisora. Si el documento no trae nombre propio pero sí cargo explícito de supervisión, devuelve ese cargo. Si no aparece nada claro, devuelve "".
-6. Devuelve únicamente JSON válido, sin explicación, sin markdown.
+5. Devuelve únicamente JSON válido, sin explicación, sin markdown.
 
 Archivo: {filename}
 
@@ -444,13 +401,6 @@ def merge_results(rule_result: dict, ai_result: Optional[dict]) -> dict:
     elif len(ia_obl) > len(reglas_obl) and len(reglas_obl) < 300:
         result["obligaciones_especificas"] = ia_obl
 
-    supervisor_reglas = result.get("nombre_supervisor", "")
-    supervisor_ia = ai_result.get("nombre_supervisor", "")
-    if looks_like_person_name(supervisor_ia):
-        result["nombre_supervisor"] = supervisor_ia
-    elif not supervisor_reglas and supervisor_ia:
-        result["nombre_supervisor"] = supervisor_ia
-
     return result
 
 
@@ -468,7 +418,6 @@ def process_single_pdf(pdf_bytes: bytes, filename: str, client: Optional[OpenAI]
         "nombre_contratista": contractor_name,
         "numero_documento_contratista": extract_contractor_document(text, contractor_name),
         "obligaciones_especificas": extract_obligaciones_especificas(raw_text or text),
-        "nombre_supervisor": extract_supervisor_name(text),
     }
 
     ai_result = None
@@ -517,7 +466,6 @@ def process_zip(zip_path: Path, client: Optional[OpenAI] = None, use_ai: bool = 
                         "nombre_contratista": "",
                         "numero_documento_contratista": "",
                         "obligaciones_especificas": "",
-                        "nombre_supervisor": "",
                         "metodo_extraccion": "error",
                         "error_ia": "",
                         "texto_extraido_chars": 0,
@@ -536,7 +484,6 @@ def save_results_to_excel(data: List[Dict], output_path: Path) -> None:
         "Tipo_contrato",
         "nombre_contratista",
         "numero_documento_contratista",
-        "nombre_supervisor",
         "obligaciones_especificas",
         "metodo_extraccion",
         "texto_extraido_chars",
