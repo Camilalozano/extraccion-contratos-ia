@@ -25,7 +25,7 @@ except Exception:
 # =========================
 # Configuración editable
 # =========================
-# Ruta por defecto del ZIP de entrada. Puedes cambiarla.
+# Ruta sugerida del ZIP de entrada (se puede cambiar al iniciar el script).
 INPUT_ZIP_PATH = r"Seleccion_500_Archivos_contratos.zip"
 
 # Ruta por defecto del Excel de salida. Puedes cambiarla.
@@ -562,6 +562,25 @@ def print_configuration(zip_path: Path, output_path: Path, use_ai: bool, api_key
     print("=" * 80)
 
 
+def prompt_input_zip_path(default_zip_path: Path) -> Path:
+    print("\nIngresa la ruta completa del archivo .zip a procesar.")
+    print(f"Presiona ENTER para usar la ruta sugerida: {default_zip_path}")
+
+    while True:
+        user_value = input("Ruta del .zip: ").strip().strip('"').strip("'")
+        zip_path = Path(user_value) if user_value else default_zip_path
+
+        if zip_path.suffix.lower() != ".zip":
+            print("La ruta ingresada no corresponde a un archivo .zip. Intenta de nuevo.")
+            continue
+
+        if not zip_path.exists():
+            print(f"No se encontró el archivo: {zip_path}. Intenta de nuevo.")
+            continue
+
+        return zip_path
+
+
 
 def main() -> None:
     zip_path = Path(INPUT_ZIP_PATH)
@@ -572,13 +591,15 @@ def main() -> None:
     # python Extract.py [ruta_zip] [ruta_salida_excel]
     if len(sys.argv) >= 2 and sys.argv[1].strip():
         zip_path = Path(sys.argv[1])
+    else:
+        zip_path = prompt_input_zip_path(zip_path)
     if len(sys.argv) >= 3 and sys.argv[2].strip():
         output_path = Path(sys.argv[2])
 
     if not zip_path.exists():
         raise FileNotFoundError(
             f"No se encontró el archivo ZIP: {zip_path}\n"
-            f"Edita INPUT_ZIP_PATH en el script o ejecútalo así:\n"
+            f"Verifica la ruta o ejecútalo así:\n"
             f"python Extract.py \"ruta_del_zip\" \"ruta_de_salida.xlsx\""
         )
 
