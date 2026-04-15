@@ -387,19 +387,12 @@ def merge_results(rule_result: dict, ai_result: Optional[dict]) -> dict:
 
     ai_result = normalize_ai_result(ai_result)
 
-    for field in ["numero_contrato", "Tipo_contrato", "nombre_contratista"]:
+    for field in ["numero_contrato", "Tipo_contrato", "nombre_contratista", "obligaciones_especificas"]:
         if ai_result.get(field):
             result[field] = ai_result[field]
 
     if ai_result.get("numero_documento_contratista"):
         result["numero_documento_contratista"] = ai_result["numero_documento_contratista"]
-
-    reglas_obl = result.get("obligaciones_especificas", "")
-    ia_obl = ai_result.get("obligaciones_especificas", "")
-    if len(reglas_obl) < 80 and ia_obl:
-        result["obligaciones_especificas"] = ia_obl
-    elif len(ia_obl) > len(reglas_obl) and len(reglas_obl) < 300:
-        result["obligaciones_especificas"] = ia_obl
 
     return result
 
