@@ -827,15 +827,9 @@ def process_single_pdf(pdf_bytes: bytes, filename: str, client: Optional[OpenAI]
             metodo = "reglas_con_fallo_ia"
 
     final_result = merge_results(rule_result, ai_result, ai_party_result)
-    final_result.update(
-        {
-            "archivo": Path(filename).name,
-            "tipo_documento_origen": doc_class,
-            "metodo_extraccion": metodo,
-            "error_ia": error_ia,
-            "texto_extraido_chars": len(text),
-        }
-    )
+    final_result.update({
+            "archivo": Path(filename).name
+        })
     return final_result
 
 
@@ -876,17 +870,10 @@ def save_results_to_excel(data: List[Dict], output_path: Path) -> None:
     df = pd.DataFrame(data)
     preferred_columns = [
         "archivo",
-        "tipo_documento_origen",
         "numero_contrato",
-        "Tipo_contrato",
         "nombre_contratista",
         "numero_documento_contratista",
-        "nombre_supervisor",
-        "obligaciones_especificas",
-        "metodo_extraccion",
-        "texto_extraido_chars",
-        "error_ia",
-        "error",
+        "obligaciones_especificas"
     ]
     df = df[[c for c in preferred_columns if c in df.columns]]
 
