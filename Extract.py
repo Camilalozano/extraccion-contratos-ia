@@ -6,7 +6,7 @@ import sys
 import unicodedata
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import pandas as pd
 from openai import OpenAI
@@ -21,10 +21,12 @@ try:
 except Exception:
     PdfReader = None
 
+
 INPUT_ZIP_PATH = r""
 OUTPUT_EXCEL_PATH = r"D:\Users\Usuario\Documents\ArchivosExtraidos.xlsx"
 USE_AI = True
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+
 
 TARGET_FIELDS = [
     "numero_contrato",
@@ -33,6 +35,20 @@ TARGET_FIELDS = [
     "numero_documento_contratista",
     "obligaciones_especificas",
     "nombre_supervisor",
+]
+
+# Números que NO deben devolverse como documento del contratista
+FORBIDDEN_CONTRACTOR_NUMBERS = {
+    "901508361",   # NIT base de ATENEA
+    "9015083614",  # NIT con dígito de verificación pegado
+}
+FORBIDDEN_DOC_CONTEXT_TERMS = [
+    "AGENCIA ATENEA",
+    "ATENEA",
+    "CONTRATANTE",
+    "LA AGENCIA",
+    "NIT 901.508.361",
+    "NIT 901508361",
 ]
 
 
@@ -122,7 +138,9 @@ def looks_like_entity_name(value: str) -> bool:
         "S.A.S", "S.A.", "LTDA", "E.S.P", "UNIVERSIDAD", "CORPORACIÓN", "CORPORACION",
         "FUNDACIÓN", "FUNDACION", "CAJA DE COMPENSACIÓN", "CAJA DE COMPENSACION",
         "EMPRESA", "ASOCIACIÓN", "ASOCIACION", "COLEGIO", "INSTITUTO", "ETB", "CAFAM",
-        "NACIONAL", "DISTRITAL"
+        "NACIONAL", "DISTRITAL", "UNIÓN TEMPORAL", "UNION TEMPORAL", "CONSORCIO",
+        "FONDO", "ALIANZA", "FUNDACION UNIVERSITARIA", "PONTIFICIA", "POLITÉCNICO",
+        "POLITECNICO", "ROSARIO", "UNISALLE", "UNAD", "FUCS", "BOSQUE"
     ]
     return any(marker in v for marker in entity_markers)
 
@@ -131,11 +149,25 @@ def clean_contract_name(value: str) -> str:
     value = normalize_nullable_text(value)
     value = re.sub(r"^(la|el)\s+otra,?\s*", "", value, flags=re.IGNORECASE)
     value = re.sub(r"^la\s+tecnolog[íi]a\s+y\s+", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"^señor(?:a)?\s+", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s{2,}", " ", value)
     return value.strip(" ,.;:\n\t")
 
 
 def cut_text(text: str, limit: int = 16000) -> str:
     return text[:limit] if len(text) > limit else text
+
+
+def normalize_contract_number_for_match(value: str) -> str:
+    if not value:
+        return ""
+    return re.sub(r"[^A-Z0-9]", "", str(value).upper())
+
+
+def is_forbidden_contractor_number(candidate: str) -> bool:
+    c = only_digits(candidate)
+    return c in FORBIDDEN_CONTRACTOR_NUMBERS
+
 
 
 # =========================
@@ -192,11 +224,11 @@ def classify_document(text: str, filename: str = "") -> str:
         return "memorando"
     if "DOCUMENTOS PREVIOS" in txt or "SOLICITUD ORDENACIÓN DE CONTRATACIÓN" in txt or "SOLICITUD ORDENACION DE CONTRATACION" in txt:
         return "estudios_previos"
-    if "ACTO ADMINISTRATIVO" in txt or "MEDIANTE EL CUAL SE JUSTIFICA" in txt or "POR LA CUAL SE JUSTIFICA" in txt:
+    if "ACTO ADMINISTRATIVO" in txt or "MEDIANTE EL CUAL SE JUSTIFICA" in txt or "POR LA CUAL SE JUSTIFICA" in txt or "JUSTIFICACIÓN" in txt or "JUSTIFICACION" in txt:
         return "acto_justificacion"
-    if "INFORME DE VERIFICACIÓN" in txt or "INFORME DE VERIFICACION" in txt or "PROPONENTE" in txt:
+    if "INFORME DE VERIFICACIÓN" in txt or "INFORME DE VERIFICACION" in txt or "PROPONENTE" in txt or "EVALUACION" in txt:
         return "evaluacion"
-    if "CONTRATO" in txt or "CONVENIO" in txt or "CLAUSULADO" in txt:
+    if "CONTRATO" in txt or "CONVENIO" in txt or "CLAUSULADO" in txt or "MINUTA" in txt:
         return "contractual"
     return "otro"
 
@@ -209,6 +241,7 @@ def extract_contract_number(text: str, filename: str = "") -> str:
         r"(?:CONTRATO|CONVENIO)[^\n]{0,120}?No\.?\s*([A-Z0-9\-_/]+(?:\s*[-–]\s*\d{4})?)",
         r"No\.?\s*(ATENEA\s*[-–]\s*\d+\s*[-–]\s*\d{4})",
         r"(ATENEA\s*[-–]\s*\d+\s*[-–]\s*\d{4})",
+        r"(CO1PCCNTR\d+)",
     ]
     for pattern in patterns:
         m = re.search(pattern, text, re.IGNORECASE)
@@ -233,29 +266,57 @@ def extract_contract_type(text: str) -> str:
     return re.sub(r"\s+", " ", m.group(1)).strip(" ,.;:\n\t").upper()
 
 
+def get_party_block(text: str) -> str:
+    patterns = [
+        r"(?:por\s+la\s+otra(?:\s+parte)?[,:\s]+)(.{0,2500}?)(?:EL\s+CONTRATISTA|LA\s+ENTIDAD\s+EJECUTORA|LA\s+ASOCIADA|LA\s+CONTRATISTA|previas\s+las\s+siguientes|CONSIDERACIONES|PRIMERA\s*:)",
+        r"(?:y\s+por\s+la\s+otra(?:\s+parte)?[,:\s]+)(.{0,2500}?)(?:EL\s+CONTRATISTA|LA\s+ENTIDAD\s+EJECUTORA|LA\s+ASOCIADA|LA\s+CONTRATISTA|previas\s+las\s+siguientes|CONSIDERACIONES|PRIMERA\s*:)",
+        r"(?:actuando\s+en\s+nombre\s+y\s+representación\s+de\s+)(.{0,500}?)(?:,?\s+quien\s+en\s+adelante|\s+con\s+NIT)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.IGNORECASE | re.DOTALL)
+        if m:
+            return normalize_spaces(m.group(1))
+    return ""
+
+
 def extract_name_from_header(text: str) -> str:
     patterns = [
-        r"celebrado\s+entre\s+[^\n]{0,180}?\s+y\s+([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?)\.",
-        r"entre\s+la\s+AGENCIA[^\n]{0,220}?\s+y\s+([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?)\.",
-        r"entre\s+la\s+AGENCIA[^\n]{0,220}?\s+y\s+([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?)(?:,|\.)",
+        r"celebrado\s+entre\s+[^\n]{0,220}?\s+y\s+([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?)\.",
+        r"entre\s+la\s+AGENCIA[^\n]{0,260}?\s+y\s+([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?)\.",
+        r"entre\s+la\s+AGENCIA[^\n]{0,260}?\s+y\s+([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?)(?:,|\.)",
+        r"actuando\s+en\s+nombre\s+y\s+representación\s+de\s+([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?),\s+con\s+NIT",
     ]
-    m = search_first(patterns, text[:3500])
+    m = search_first(patterns, text[:4500])
     if not m:
         return ""
     return clean_contract_name(m.group(1))
 
 
 def extract_name_from_party_block(text: str) -> str:
+    block = get_party_block(text) or text[:10000]
     patterns = [
-        r"y\s+por\s+la\s+otra,\s*([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?),\s*mayor\s+de\s+edad",
-        r"y\s+por\s+la\s+otra,\s*([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?),\s*identificad[oa]",
-        r"por\s+la\s+otra,\s*la\s+([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?),\s*con\s+NIT",
-        r"por\s+la\s+otra,\s*el\s+([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?),\s*con\s+NIT",
-        r"por\s+la\s+otra\s+parte,\s*([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?),\s*(?:mayor\s+de\s+edad|identificad[oa]|actuando)",
-        r"entre\s+la\s+AGENCIA[^\n]{0,220}?\s+y\s+la\s+([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?),\s*con\s+NIT",
-        r"entre\s+la\s+AGENCIA[^\n]{0,220}?\s+y\s+el\s+([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?),\s*con\s+NIT",
+        r"la\s+([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?),\s*con\s+NIT",
+        r"el\s+([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?),\s*con\s+NIT",
+        r"([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]+?),\s*mayor\s+de\s+edad",
+        r"([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]+?),\s*identificad[oa]",
+        r"actuando\s+en\s+nombre\s+y\s+representación\s+de\s+([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?)(?:,|\s+con\s+NIT)",
+        r"representación\s+de\s+([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?)(?:,|\s+con\s+NIT)",
     ]
-    m = search_first(patterns, text[:9000])
+    for pat in patterns:
+        m = re.search(pat, block, re.IGNORECASE | re.DOTALL)
+        if m:
+            val = clean_contract_name(m.group(1))
+            if val and "AGENCIA ATENEA" not in val.upper():
+                return val
+    return ""
+
+
+def extract_name_from_role_patterns(text: str) -> str:
+    patterns = [
+        r"quien\s+en\s+adelante\s+se\s+denominar[áa]\s+EL\s+CONTRATISTA.*?por\s+la\s+otra,\s*([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]+?),",
+        r"LA\s+ENTIDAD\s+EJECUTORA.*?([A-ZÁÉÍÓÚÑ0-9\.\-\s]+?),\s*con\s+NIT",
+    ]
+    m = search_first(patterns, text[:12000])
     if not m:
         return ""
     return clean_contract_name(m.group(1))
@@ -263,13 +324,17 @@ def extract_name_from_party_block(text: str) -> str:
 
 def extract_contractor_name(text: str, filename: str = "") -> str:
     candidates = []
-    for candidate in [extract_name_from_header(text), extract_name_from_party_block(text)]:
+    for candidate in [
+        extract_name_from_header(text),
+        extract_name_from_party_block(text),
+        extract_name_from_role_patterns(text),
+    ]:
         if candidate:
             candidates.append(candidate)
 
-    # Prefer entity names when there is NIT nearby; otherwise prefer person names.
     if candidates:
-        candidates = list(dict.fromkeys(candidates))
+        candidates = [c for c in dict.fromkeys(candidates) if c]
+        # Prefer entity if there is explicit NIT nearby
         entity_candidates = [c for c in candidates if looks_like_entity_name(c)]
         person_candidates = [c for c in candidates if looks_like_person_name(c)]
         if entity_candidates:
@@ -278,70 +343,144 @@ def extract_contractor_name(text: str, filename: str = "") -> str:
             return person_candidates[0]
         return candidates[0]
 
-    # Fallback from filename on minuta contractual person-based docs
     stem = Path(filename).stem.upper()
-    m = re.search(r"MINUTA\s+CONTRACTUAL\s+(.+)$", stem)
+    m = re.search(r"MINUTA\s+(?:CONTRACTUAL|CLAUSULADO)?\s*(.+)$", stem)
     if m:
-        return clean_contract_name(m.group(1).replace("ATENEA", "").replace("-", " "))
+        val = clean_contract_name(m.group(1).replace("ATENEA", "").replace("-", " "))
+        if val:
+            return val
     return ""
 
 
-def build_document_candidates(text: str, contractor_name: str = "") -> List[str]:
+def build_document_candidates(text: str, contractor_name: str = "") -> List[dict]:
+    """
+    Devuelve candidatos con contexto para poder excluir los de ATENEA.
+    """
     text_norm = normalize_spaces(text)
-    candidates: List[str] = []
+    candidates: List[dict] = []
 
     num_pattern = r"([0-9OIl][0-9OIl\.\,\-\s]{5,}[0-9OIl])"
+    contractor_name_norm = normalize_spaces(contractor_name)
 
-    if contractor_name:
-        contractor_name_esc = re.escape(normalize_spaces(contractor_name))
-        m_name = re.search(contractor_name_esc, text_norm, re.IGNORECASE)
+    def add_candidate(raw_value: str, source: str, context: str, preferred_type: str = ""):
+        value = only_digits(raw_value)
+        if not value:
+            return
+        if len(value) < 6 or len(value) > 12:
+            return
+        candidates.append(
+            {
+                "value": value,
+                "source": source,
+                "context": normalize_spaces(context)[:500],
+                "preferred_type": preferred_type,
+            }
+        )
+
+    # 1) Bloque principal del contratista
+    party_block = get_party_block(text_norm)
+    if party_block:
+        local_patterns = [
+            (r"NIT\s*(?:No\.?|#|:)?\s*([0-9\.\-\s]{6,25})", "party_block_nit", "nit"),
+            (r"c[ée]dula\s+de\s+ciudadan[íi]a\s*(?:No\.?|N°|Nº|#|:)?\s*([0-9\.\-\s]{6,25})", "party_block_cc", "cc"),
+            (r"\bC\.?\s*C\.?\s*(?:No\.?|N°|Nº|#|:)?\s*([0-9\.\-\s]{6,25})", "party_block_cc_abbr", "cc"),
+            (r"identificad[oa][^\n]{0,120}?([0-9\.\-\s]{6,25})", "party_block_identificada", ""),
+        ]
+        for pat, source, preferred_type in local_patterns:
+            for m in re.finditer(pat, party_block, re.IGNORECASE):
+                add_candidate(m.group(1), source, party_block, preferred_type)
+
+    # 2) Ventana alrededor del nombre del contratista
+    if contractor_name_norm:
+        m_name = re.search(re.escape(contractor_name_norm), text_norm, re.IGNORECASE)
         if m_name:
-            start = max(0, m_name.start() - 120)
-            end = min(len(text_norm), m_name.end() + 450)
+            start = max(0, m_name.start() - 180)
+            end = min(len(text_norm), m_name.end() + 520)
             window = text_norm[start:end]
-
             local_patterns = [
-                rf"{contractor_name_esc}.{{0,180}}?c[ée]dula\s+de\s+ciudadan[íi]a\s*(?:No\.?|N°|Nº|#|:)?\s*{num_pattern}",
-                rf"{contractor_name_esc}.{{0,180}}?C\.?\s*C\.?\s*(?:No\.?|N°|Nº|#|:)?\s*{num_pattern}",
-                rf"{contractor_name_esc}.{{0,220}}?NIT\s*(?:No\.?|#|:)?\s*{num_pattern}",
-                rf"{contractor_name_esc}.{{0,220}}?identificad[oa].{{0,80}}?{num_pattern}",
+                (rf"{re.escape(contractor_name_norm)}.{{0,180}}?NIT\s*(?:No\.?|#|:)?\s*{num_pattern}", "name_window_nit", "nit"),
+                (rf"{re.escape(contractor_name_norm)}.{{0,180}}?c[ée]dula\s+de\s+ciudadan[íi]a\s*(?:No\.?|N°|Nº|#|:)?\s*{num_pattern}", "name_window_cc", "cc"),
+                (rf"{re.escape(contractor_name_norm)}.{{0,180}}?\bC\.?\s*C\.?\s*(?:No\.?|N°|Nº|#|:)?\s*{num_pattern}", "name_window_cc_abbr", "cc"),
+                (rf"{re.escape(contractor_name_norm)}.{{0,220}}?identificad[oa].{{0,80}}?{num_pattern}", "name_window_identificada", ""),
             ]
-            for pattern in local_patterns:
-                for m in re.finditer(pattern, window, re.IGNORECASE | re.DOTALL):
-                    candidates.append(only_digits(m.group(1)))
+            for pat, source, preferred_type in local_patterns:
+                for m in re.finditer(pat, window, re.IGNORECASE | re.DOTALL):
+                    add_candidate(m.group(1), source, window, preferred_type)
 
-    party_block_patterns = [
-        rf"por\s+la\s+otra[^\n]{{0,600}}?c[ée]dula\s+de\s+ciudadan[íi]a\s*(?:No\.?|N°|Nº|#|:)?\s*{num_pattern}",
-        rf"por\s+la\s+otra[^\n]{{0,600}}?C\.?\s*C\.?\s*(?:No\.?|N°|Nº|#|:)?\s*{num_pattern}",
-        rf"por\s+la\s+otra[^\n]{{0,600}}?NIT\s*(?:No\.?|#|:)?\s*{num_pattern}",
-        rf"representada\s+legalmente\s+por\s+[^\n]{{0,180}}?c[ée]dula\s+de\s+ciudadan[íi]a\s*(?:No\.?|N°|Nº|#|:)?\s*{num_pattern}",
+    # 3) Casos donde aparece representante legal y entidad
+    rep_patterns = [
+        (r"representada\s+legalmente\s+por\s+[^\n]{0,200}?c[ée]dula\s+de\s+ciudadan[íi]a\s*(?:No\.?|#|:)?\s*([0-9\.\-\s]{6,25})", "representante_cc", "cc"),
+        (r"actuando\s+en\s+nombre\s+y\s+representación\s+de\s+[^\n]{0,180}?con\s+NIT\s*(?:No\.?|#|:)?\s*([0-9\.\-\s]{6,25})", "entity_after_rep_nit", "nit"),
     ]
-    head = text_norm[:12000]
-    for pattern in party_block_patterns:
-        for m in re.finditer(pattern, head, re.IGNORECASE | re.DOTALL):
-            candidates.append(only_digits(m.group(1)))
+    head = text_norm[:15000]
+    for pat, source, preferred_type in rep_patterns:
+        for m in re.finditer(pat, head, re.IGNORECASE | re.DOTALL):
+            context = head[max(0, m.start()-150):min(len(head), m.end()+150)]
+            add_candidate(m.group(1), source, context, preferred_type)
 
-    # Header candidate for juridical entities.
-    for m in re.finditer(r"\bNIT\s*(?:No\.?|#|:)?\s*([0-9\.\-\s]{6,25})", head, re.IGNORECASE):
-        candidates.append(only_digits(m.group(1)))
-
-    return [c for c in candidates if 6 <= len(c) <= 12]
+    return candidates
 
 
-def score_document_candidate(candidate: str, contractor_name: str = "") -> int:
-    score = 0
-    if not candidate:
+def score_document_candidate(candidate: dict, contractor_name: str = "") -> int:
+    value = candidate.get("value", "")
+    context = (candidate.get("context", "") or "").upper()
+    preferred_type = candidate.get("preferred_type", "")
+    source = candidate.get("source", "")
+
+    if not value:
         return -999
-    if 8 <= len(candidate) <= 10:
-        score += 3
-    if len(candidate) == 9:
-        score += 1  # often NIT base
-    if len(candidate) == 10:
-        score += 1  # often CC
-    if looks_like_entity_name(contractor_name) and len(candidate) in (9, 10):
+    if is_forbidden_contractor_number(value):
+        return -1000
+
+    score = 0
+
+    # contexto favorable
+    if source.startswith("party_block"):
+        score += 6
+    if source.startswith("name_window"):
+        score += 5
+    if "REPRESENTACIÓN DE" in context or "REPRESENTACION DE" in context:
         score += 2
-    if looks_like_person_name(contractor_name) and len(candidate) in (8, 10):
+
+    # contexto desfavorable de la contratante
+    if any(term in context for term in FORBIDDEN_DOC_CONTEXT_TERMS):
+        # solo castigar fuertemente si NO hay pista clara de que también sea del contratista
+        if "POR LA OTRA" not in context and "REPRESENTADA LEGALMENTE" not in context and "ACTUANDO EN NOMBRE Y REPRESENTACIÓN DE" not in context and "ACTUANDO EN NOMBRE Y REPRESENTACION DE" not in context:
+            score -= 8
+
+    # longitudes típicas observadas en el training set:
+    # entidades: sobre todo 9 dígitos; personas: 8-10
+    if 8 <= len(value) <= 10:
         score += 2
+    if len(value) == 9:
+        score += 2
+    if len(value) == 10:
+        score += 1
+
+    if looks_like_entity_name(contractor_name):
+        if preferred_type == "nit":
+            score += 4
+        if len(value) == 9:
+            score += 4
+        if len(value) == 10:
+            score += 2
+    elif looks_like_person_name(contractor_name):
+        if preferred_type == "cc":
+            score += 4
+        if len(value) in (8, 10):
+            score += 4
+        if len(value) == 9 and preferred_type != "cc":
+            score -= 2
+    else:
+        if preferred_type == "nit":
+            score += 1
+        if preferred_type == "cc":
+            score += 1
+
+    # evitar el NIT de ATENEA aunque aparezca dentro del bloque
+    if value.startswith("901508361"):
+        score -= 50
+
     return score
 
 
@@ -349,8 +488,15 @@ def extract_contractor_document(text: str, contractor_name: str = "") -> str:
     candidates = build_document_candidates(text, contractor_name)
     if not candidates:
         return ""
-    ranked = sorted(candidates, key=lambda c: (score_document_candidate(c, contractor_name), len(c)), reverse=True)
-    return ranked[0]
+    ranked = sorted(
+        candidates,
+        key=lambda c: (score_document_candidate(c, contractor_name), len(c.get("value", ""))),
+        reverse=True,
+    )
+    top = ranked[0]["value"]
+    if is_forbidden_contractor_number(top):
+        return ""
+    return top
 
 
 def extract_obligaciones_especificas(text: str) -> str:
@@ -410,6 +556,10 @@ def build_focus_context(text: str, contractor_name_rule: str, contractor_doc_rul
     head = cut_text(text[:9000], 9000)
     parts.append("=== INICIO DEL DOCUMENTO ===\n" + head)
 
+    party_block = get_party_block(text)
+    if party_block:
+        parts.append("=== BLOQUE PRINCIPAL DEL CONTRATISTA ===\n" + cut_text(party_block, 3000))
+
     if contractor_name_rule or contractor_doc_rule:
         parts.append(
             "=== CANDIDATOS POR REGLAS PARA CONTRATISTA ===\n"
@@ -422,12 +572,6 @@ def build_focus_context(text: str, contractor_name_rule: str, contractor_doc_rul
 
     if supervisor_regla:
         parts.append("=== CANDIDATO DE SUPERVISIÓN ===\n" + supervisor_regla)
-
-    party = re.search(r"por\s+la\s+otra", text, re.IGNORECASE)
-    if party:
-        start = max(0, party.start() - 500)
-        end = min(len(text), party.start() + 3000)
-        parts.append("=== CONTEXTO DEL CONTRATISTA ===\n" + text[start:end])
 
     return "\n\n".join(parts)
 
@@ -453,14 +597,17 @@ Analiza el siguiente documento contractual en español y devuelve SOLO JSON vál
 Reglas obligatorias:
 1. No inventes datos.
 2. Si un campo no aparece claramente, devuelve "".
-3. nombre_contratista debe ser la persona o entidad contratista, NO el funcionario de ATENEA.
-4. Si el contratista es una entidad, devuelve el nombre de la entidad contratista y en numero_documento_contratista devuelve su NIT si aparece.
-5. Si el contratista es persona natural, devuelve su nombre completo y su cédula.
-6. numero_documento_contratista debe quedar SOLO con dígitos.
-7. obligaciones_especificas debe conservar el texto del bloque, sin resumir.
-8. nombre_supervisor debe ser persona o cargo supervisor.
-9. Tipo de documento detectado: {doc_class}. Si el documento no es propiamente un contrato/minuta pero sí menciona claramente un contratista o entidad contratista, extrae esa información. Si no, deja campos vacíos.
-10. Devuelve únicamente JSON válido, sin explicación, sin markdown.
+3. nombre_contratista debe ser la persona o entidad contratista, NO el funcionario de ATENEA ni la parte contratante.
+4. numero_documento_contratista debe ser la identificación del contratista:
+   - si es persona natural: su cédula;
+   - si es persona jurídica: su NIT.
+5. El valor "901508361" NO es el documento del contratista. Ese número corresponde al NIT base de ATENEA y debe evitarse.
+6. Si ves "901.508.361-4" o variantes, NO lo devuelvas como numero_documento_contratista.
+7. numero_documento_contratista debe quedar SOLO con dígitos.
+8. obligaciones_especificas debe conservar el texto del bloque, sin resumir.
+9. nombre_supervisor debe ser persona o cargo supervisor.
+10. Tipo de documento detectado: {doc_class}. Si el documento no es propiamente una minuta pero sí menciona con claridad al contratista, extrae esa información.
+11. Devuelve únicamente JSON válido, sin explicación, sin markdown.
 
 Archivo: {filename}
 
@@ -483,13 +630,7 @@ Texto:
 
 
 def extract_party_only_raw(client: OpenAI, text: str, filename: str, doc_class: str, rule_name: str, rule_doc: str) -> str:
-    party = re.search(r"por\s+la\s+otra", text, re.IGNORECASE)
-    if party:
-        start = max(0, party.start() - 500)
-        end = min(len(text), party.start() + 3500)
-        focus = text[start:end]
-    else:
-        focus = text[:5000]
+    focus = get_party_block(text) or text[:5500]
 
     prompt = f"""
 Extrae SOLO estos campos del siguiente documento y devuelve SOLO JSON válido:
@@ -498,12 +639,15 @@ Extrae SOLO estos campos del siguiente documento y devuelve SOLO JSON válido:
 
 Reglas:
 1. No inventes datos.
-2. nombre_contratista debe ser el contratista o la entidad contratista, NO el funcionario de ATENEA.
+2. nombre_contratista debe ser el contratista o la entidad contratista, NO el funcionario de ATENEA ni la parte contratante.
 3. Si es persona natural, numero_documento_contratista debe ser su cédula.
-4. Si es persona jurídica, numero_documento_contratista debe ser su NIT si aparece; si no aparece el NIT pero sí la cédula del representante legal, puedes devolver esa cédula SOLO si es la única identificación explícita asociada al contratista.
-5. numero_documento_contratista debe quedar SOLO con dígitos.
-6. Tipo de documento detectado: {doc_class}.
-7. Devuelve únicamente JSON válido, sin explicación, sin markdown.
+4. Si es persona jurídica, numero_documento_contratista debe ser su NIT si aparece.
+5. El valor "901508361" NO es el documento del contratista. Ese número corresponde al NIT base de ATENEA y debe evitarse.
+6. Si ves "901.508.361-4" o variantes, NO lo devuelvas.
+7. numero_documento_contratista debe quedar SOLO con dígitos.
+8. Si aparece un representante legal con cédula y también aparece el NIT de la entidad contratista, prioriza el NIT de la entidad.
+9. Tipo de documento detectado: {doc_class}.
+10. Devuelve únicamente JSON válido, sin explicación, sin markdown.
 
 Archivo: {filename}
 Candidatos por reglas:
@@ -530,6 +674,8 @@ def normalize_ai_result(data: dict) -> dict:
     normalized = {field: normalize_nullable_text(data.get(field, "")) for field in TARGET_FIELDS}
     normalized["numero_documento_contratista"] = only_digits(normalized.get("numero_documento_contratista"))
     normalized["numero_contrato"] = normalized.get("numero_contrato", "").replace("–", "-")
+    if is_forbidden_contractor_number(normalized.get("numero_documento_contratista", "")):
+        normalized["numero_documento_contratista"] = ""
     return normalized
 
 
@@ -548,20 +694,31 @@ def should_override_name(rule_name: str, ai_name: str) -> bool:
 
 
 def should_override_document(rule_name: str, rule_doc: str, ai_name: str, ai_doc: str) -> bool:
-    if not ai_doc:
+    if not ai_doc or is_forbidden_contractor_number(ai_doc):
         return False
+    if is_forbidden_contractor_number(rule_doc):
+        return True
     if not rule_doc:
         return True
-    if looks_like_entity_name(ai_name or rule_name):
-        return len(ai_doc) in (9, 10) and len(rule_doc) not in (9, 10)
-    if looks_like_person_name(ai_name or rule_name):
-        return len(ai_doc) in (8, 10) and len(rule_doc) not in (8, 10)
+
+    target_name = ai_name or rule_name
+    if looks_like_entity_name(target_name):
+        if len(ai_doc) == 9 and len(rule_doc) != 9:
+            return True
+        if len(ai_doc) == 10 and len(rule_doc) not in (9, 10):
+            return True
+    if looks_like_person_name(target_name):
+        if len(ai_doc) in (8, 10) and len(rule_doc) not in (8, 10):
+            return True
     return False
 
 
 def merge_results(rule_result: dict, ai_result: Optional[dict], ai_party_result: Optional[dict]) -> dict:
     result = {field: normalize_nullable_text(rule_result.get(field, "")) for field in TARGET_FIELDS}
     result["numero_documento_contratista"] = only_digits(result.get("numero_documento_contratista"))
+
+    if is_forbidden_contractor_number(result["numero_documento_contratista"]):
+        result["numero_documento_contratista"] = ""
 
     for ai in [ai_result, ai_party_result]:
         if not ai:
@@ -599,6 +756,9 @@ def merge_results(rule_result: dict, ai_result: Optional[dict], ai_party_result:
         elif not supervisor_reglas and supervisor_ia:
             result["nombre_supervisor"] = supervisor_ia
 
+    if is_forbidden_contractor_number(result.get("numero_documento_contratista", "")):
+        result["numero_documento_contratista"] = ""
+
     return result
 
 
@@ -629,16 +789,30 @@ def process_single_pdf(pdf_bytes: bytes, filename: str, client: Optional[OpenAI]
 
     if use_ai and client is not None:
         try:
-            raw_ai = extract_contract_fields_raw(client, text=text, filename=filename, rule_candidates=rule_result, doc_class=doc_class)
+            raw_ai = extract_contract_fields_raw(
+                client,
+                text=text,
+                filename=filename,
+                rule_candidates=rule_result,
+                doc_class=doc_class,
+            )
             ai_result = normalize_ai_result(safe_json_loads(raw_ai))
             metodo = "hibrido_reglas_ia"
 
-            # segunda pasada enfocada en contratista cuando quedó vacío o sospechoso
-            if (
-                not rule_result.get("nombre_contratista")
-                or not rule_result.get("numero_documento_contratista")
-                or (looks_like_person_name(rule_result.get("nombre_contratista", "")) and len(rule_result.get("numero_documento_contratista", "")) < 8)
-            ):
+            suspicious_doc = (
+                not rule_result.get("numero_documento_contratista")
+                or is_forbidden_contractor_number(rule_result.get("numero_documento_contratista", ""))
+                or (
+                    looks_like_entity_name(rule_result.get("nombre_contratista", ""))
+                    and len(rule_result.get("numero_documento_contratista", "")) not in (9, 10)
+                )
+                or (
+                    looks_like_person_name(rule_result.get("nombre_contratista", ""))
+                    and len(rule_result.get("numero_documento_contratista", "")) not in (8, 10)
+                )
+            )
+
+            if not rule_result.get("nombre_contratista") or suspicious_doc:
                 raw_party = extract_party_only_raw(
                     client,
                     text=text,
