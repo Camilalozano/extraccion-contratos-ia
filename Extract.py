@@ -868,6 +868,11 @@ def process_zip(zip_path: Path, client: Optional[OpenAI] = None, use_ai: bool = 
 
 def save_results_to_excel(data: List[Dict], output_path: Path) -> None:
     df = pd.DataFrame(data)
+    excluded_columns = {"tipo_documento_origen", "nombre_supervisor"}
+    existing_excluded = [c for c in excluded_columns if c in df.columns]
+    if existing_excluded:
+        df = df.drop(columns=existing_excluded)
+
     preferred_columns = [
         "archivo",
         "numero_contrato",
