@@ -169,6 +169,55 @@ def is_forbidden_contractor_number(candidate: str) -> bool:
     return c in FORBIDDEN_CONTRACTOR_NUMBERS
 
 
+def clean_obligaciones_footer_noise(text: str) -> str:
+    if not text:
+        return ""
+
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    footer_block_patterns = [
+        # Pie de página institucional ATENEA
+        r"\n?\s*\d{1,2}\s*\n\s*Carrera\s+10\s+No\.\s*28\s*[–-]\s*49\s+torre\s+A\s+piso\s+26\s*\n\s*PBX:\s*\(601\)\s*6660006\s*\n\s*www\.agenciaatenea\.gov\.co\s*\n\s*atencionalciudadano@agenciaatenea\.gov\.co\s*\n\s*Informaci[óo]n:\s*L[ií]nea\s*195\s*\n?",
+        # Bloque de minuta / formato documental
+        r"\n?\s*Minuta\s+Contrato\s+para\s+Prestaci[óo]n\s+de\s*\n\s*Servicios\s+Profesionales\s+y\s+de\s+Apoyo\s+a\s+la\s*\n\s*Gesti[óo]n\s*\n\s*CODIGO:\s*F7_P11_C\s*\n\s*VERSI[ÓOÒ]N:\s*1\s*\n\s*Proceso\s+Gesti[óo]n\s+Contractual\s*\n\s*FECHA\s+DE\s+APROBACI[ÓO]N:\s*\n\s*\d{2}/\d{2}/\d{4}\s*\n?",
+        # Mensaje ambiental + copia no controlada
+        r"\n?\s*Piensa\s+en\s+el\s+medio\s+ambiente,\s*antes\s+de\s+imprimir\s+este\s+documento\.\s*\n\s*Cualquier\s+copia\s+impresa\s+de\s+este\s+documento\s+se\s+considera\s+como\s+COPIA\s+NO\s+CONTROLADA\s*\n?",
+    ]
+
+    for pattern in footer_block_patterns:
+        cleaned = re.sub(pattern, "\n", cleaned, flags=re.IGNORECASE)
+
+    lines = cleaned.split("\n")
+    footer_line_patterns = [
+        r"^\s*P[áa]gina\s+\d+\s+de\s+\d+\s*$",
+        r"^\s*CODIGO:\s*F7_P11_C\s*$",
+        r"^\s*VERSI[ÓOÒ]N:\s*1\s*$",
+        r"^\s*Proceso\s+Gesti[óo]n\s+Contractual\s*$",
+        r"^\s*FECHA\s+DE\s+APROBACI[ÓO]N:\s*$",
+        r"^\s*\d{2}/\d{2}/\d{4}\s*$",
+        r"^\s*www\.agenciaatenea\.gov\.co\s*$",
+        r"^\s*atencionalciudadano@agenciaatenea\.gov\.co\s*$",
+        r"^\s*PBX:\s*\(601\)\s*6660006\s*$",
+        r"^\s*Informaci[óo]n:\s*L[ií]nea\s*195\s*$",
+        r"^\s*Carrera\s+10\s+No\.\s*28\s*[–-]\s*49\s+torre\s+A\s+piso\s+26\s*$",
+        r"^\s*Piensa\s+en\s+el\s+medio\s+ambiente,\s*antes\s+de\s+imprimir\s+este\s+documento\.\s*$",
+        r"^\s*Cualquier\s+copia\s+impresa\s+de\s+este\s+documento\s+se\s+considera\s+como\s+COPIA\s+NO\s+CONTROLADA\s*$",
+        r"^\s*Minuta\s+Contrato\s+para\s+Prestaci[óo]n\s+de\s*$",
+        r"^\s*Servicios\s+Profesionales\s+y\s+de\s+Apoyo\s+a\s+la\s*$",
+        r"^\s*Gesti[óo]n\s*$",
+    ]
+
+    kept_lines = []
+    for line in lines:
+        if any(re.match(p, line, flags=re.IGNORECASE) for p in footer_line_patterns):
+            continue
+        kept_lines.append(line)
+
+    cleaned = "\n".join(kept_lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 
 # =========================
 # PDF
@@ -519,6 +568,7 @@ def extract_obligaciones_especificas(text: str) -> str:
     end_match = search_first(end_patterns, tail)
     obligaciones = tail[: end_match.start()] if end_match else tail
     obligaciones = obligaciones.strip()
+    obligaciones = clean_obligaciones_footer_noise(obligaciones)
     obligaciones = re.sub(r"\n{3,}", "\n\n", obligaciones)
     return obligaciones.strip()
 
@@ -758,6 +808,8 @@ def merge_results(rule_result: dict, ai_result: Optional[dict], ai_party_result:
 
     if is_forbidden_contractor_number(result.get("numero_documento_contratista", "")):
         result["numero_documento_contratista"] = ""
+
+    result["obligaciones_especificas"] = clean_obligaciones_footer_noise(result.get("obligaciones_especificas", ""))
 
     return result
 
