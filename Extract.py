@@ -868,19 +868,16 @@ def process_zip(zip_path: Path, client: Optional[OpenAI] = None, use_ai: bool = 
 
 def save_results_to_excel(data: List[Dict], output_path: Path) -> None:
     df = pd.DataFrame(data)
-    excluded_columns = {"tipo_documento_origen", "nombre_supervisor"}
-    existing_excluded = [c for c in excluded_columns if c in df.columns]
-    if existing_excluded:
-        df = df.drop(columns=existing_excluded)
 
-    preferred_columns = [
+    # Columnas permitidas en el Excel final (sin nombre_supervisor)
+    excel_columns = [
         "archivo",
         "numero_contrato",
         "nombre_contratista",
         "numero_documento_contratista",
-        "obligaciones_especificas"
+        "obligaciones_especificas",
     ]
-    df = df[[c for c in preferred_columns if c in df.columns]]
+    df = df[[c for c in excel_columns if c in df.columns]]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
