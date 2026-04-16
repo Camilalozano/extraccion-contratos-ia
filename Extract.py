@@ -518,9 +518,59 @@ def extract_obligaciones_especificas(text: str) -> str:
     tail = text[start_match.end():]
     end_match = search_first(end_patterns, tail)
     obligaciones = tail[: end_match.start()] if end_match else tail
-    obligaciones = obligaciones.strip()
-    obligaciones = re.sub(r"\n{3,}", "\n\n", obligaciones)
-    return obligaciones.strip()
+    obligaciones = clean_obligaciones_especificas(obligaciones)
+    return obligaciones
+
+
+def clean_obligaciones_especificas(text: str) -> str:
+    if not text:
+        return ""
+
+    cleaned = limpiar_texto_para_llm(text)
+
+    footer_block_patterns = [
+        # Pie con dirección/contacto de ATENEA
+        r"(?is)(?:^|\n)\s*\d{1,3}\s*\n\s*Carrera\s+10\s+No\.\s*28\s*[–-]\s*49\s*torre\s*A\s*piso\s*26\s*\n"
+        r"\s*PBX:\s*\(601\)\s*6660006\s*\n\s*www\.agenciaatenea\.gov\.co\s*\n"
+        r"\s*atencionalciudadano@agenciaatenea\.gov\.co\s*\n\s*Informaci[óo]n:\s*L[íi]nea\s*195\s*(?:\n|$)",
+        # Bloque de minuta repetido como pie de página
+        r"(?is)(?:^|\n)\s*Minuta\s+Contrato\s+para\s+Prestaci[óo]n\s+de\s+Servicios\s+Profesionales\s+y\s+de\s+Apoyo\s+a\s+la\s+Gesti[óo]n\s*"
+        r".{0,500}?CODIGO:\s*F7_P11_C\s*.*?VERSI[ÓO]N\s*:?\s*1\s*.*?Proceso\s+Gesti[óo]n\s+Contractual\s*"
+        r".{0,300}?FECHA\s+DE\s+APROBACI[ÓO]N\s*:?\s*\n?\s*\d{2}/\d{2}/\d{4}\s*(?:\n|$)",
+        # Leyenda ambiental + bloque de minuta
+        r"(?is)(?:^|\n)\s*Piensa\s+en\s+el\s+medio\s+ambiente,\s*antes\s+de\s+imprimir\s+este\s+documento\.\s*"
+        r"\n\s*Cualquier\s+copia\s+impresa\s+de\s+este\s+documento\s+se\s+considera\s+como\s+COPIA\s+NO\s+CONTROLADA\s*"
+        r".{0,900}?(?:\n|$)",
+    ]
+    for pattern in footer_block_patterns:
+        cleaned = re.sub(pattern, "\n", cleaned)
+
+    # Remanentes típicos de pie de página
+    line_patterns = [
+        r"^\s*P[áa]gina\s+\d+\s+de\s+\d+\s*$",
+        r"^\s*CODIGO:\s*F7_P11_C\s*$",
+        r"^\s*VERSI[ÓO]N\s*:?\s*1\s*$",
+        r"^\s*Proceso\s+Gesti[óo]n\s+Contractual\s*$",
+        r"^\s*FECHA\s+DE\s+APROBACI[ÓO]N\s*:?\s*$",
+        r"^\s*\d{2}/\d{2}/\d{4}\s*$",
+        r"^\s*www\.agenciaatenea\.gov\.co\s*$",
+        r"^\s*atencionalciudadano@agenciaatenea\.gov\.co\s*$",
+        r"^\s*PBX:\s*\(601\)\s*6660006\s*$",
+        r"^\s*Informaci[óo]n:\s*L[íi]nea\s*195\s*$",
+        r"^\s*Carrera\s+10\s+No\.\s*28\s*[–-]\s*49\s*torre\s*A\s*piso\s*26\s*$",
+        r"^\s*Minuta\s+Contrato\s+para\s+Prestaci[óo]n\s+de\s*$",
+        r"^\s*Servicios\s+Profesionales\s+y\s+de\s+Apoyo\s+a\s+la\s*$",
+        r"^\s*Gesti[óo]n\s*$",
+    ]
+    lines = []
+    for line in cleaned.splitlines():
+        if any(re.match(lp, line, re.IGNORECASE) for lp in line_patterns):
+            continue
+        lines.append(line)
+
+    cleaned = "\n".join(lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 def extract_supervisor_name(text: str) -> str:
@@ -674,6 +724,7 @@ def normalize_ai_result(data: dict) -> dict:
     normalized = {field: normalize_nullable_text(data.get(field, "")) for field in TARGET_FIELDS}
     normalized["numero_documento_contratista"] = only_digits(normalized.get("numero_documento_contratista"))
     normalized["numero_contrato"] = normalized.get("numero_contrato", "").replace("–", "-")
+    normalized["obligaciones_especificas"] = clean_obligaciones_especificas(normalized.get("obligaciones_especificas", ""))
     if is_forbidden_contractor_number(normalized.get("numero_documento_contratista", "")):
         normalized["numero_documento_contratista"] = ""
     return normalized
