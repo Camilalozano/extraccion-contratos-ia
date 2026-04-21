@@ -33,6 +33,7 @@ TARGET_FIELDS = [
     "Tipo_contrato",
     "nombre_contratista",
     "numero_documento_contratista",
+    "Objeto",
     "obligaciones_especificas",
     "nombre_supervisor",
 ]
@@ -313,6 +314,30 @@ def extract_contract_type(text: str) -> str:
     if not m:
         return ""
     return re.sub(r"\s+", " ", m.group(1)).strip(" ,.;:\n\t").upper()
+
+
+def clean_objeto_text(value: str) -> str:
+    if not value:
+        return ""
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    value = clean_obligaciones_footer_noise(value)
+    value = re.sub(r"^\s*[:\-–—]+\s*", "", value)
+    value = re.sub(r"\s+", " ", value).strip(" ,.;:\n\t")
+    return value
+
+
+def extract_objeto(text: str) -> str:
+    patterns = [
+        r"CL[ÁA]USULA\s+PRIMERA\s*[:.\-–—]?\s*OBJETO\s*[:.\-–—]?\s*(.+?)(?=\n\s*(?:ALCANCE\s+AL\s+OBJETO\s*:|CL[ÁA]USULA\s+SEGUNDA\s*:|SEGUNDA\s*:|PAR[ÁA]GRAFO|B\)\s*OBLIGACIONES|A\)\s*OBLIGACIONES))",
+        r"PRIMERA\s*[:.\-–—]?\s*OBJETO\s*[:.\-–—]?\s*(.+?)(?=\n\s*(?:ALCANCE\s+AL\s+OBJETO\s*:|CL[ÁA]USULA\s+SEGUNDA\s*:|SEGUNDA\s*:|PAR[ÁA]GRAFO|B\)\s*OBLIGACIONES|A\)\s*OBLIGACIONES))",
+        r"OBJETO\s+DEL\s+CONTRATO\s*[:.\-–—]?\s*(.+?)(?=\n\s*(?:ALCANCE\s+AL\s+OBJETO\s*:|CL[ÁA]USULA\s+SEGUNDA\s*:|SEGUNDA\s*:|PAR[ÁA]GRAFO|B\)\s*OBLIGACIONES|A\)\s*OBLIGACIONES))",
+    ]
+    m = search_first(patterns, text, flags=re.IGNORECASE | re.DOTALL)
+    if not m:
+        return ""
+    objeto = m.group(1).strip()
+    objeto = re.split(r"\n\s*ALCANCE\s+AL\s+OBJETO\s*:", objeto, maxsplit=1, flags=re.IGNORECASE)[0]
+    return clean_objeto_text(objeto)
 
 
 def get_party_block(text: str) -> str:
@@ -601,7 +626,7 @@ def get_openai_client(api_key: Optional[str]) -> Optional[OpenAI]:
         return None
 
 
-def build_focus_context(text: str, contractor_name_rule: str, contractor_doc_rule: str, obligaciones_regla: str, supervisor_regla: str) -> str:
+def build_focus_context(text: str, contractor_name_rule: str, contractor_doc_rule: str, objeto_regla: str, obligaciones_regla: str, supervisor_regla: str) -> str:
     parts = []
     head = cut_text(text[:9000], 9000)
     parts.append("=== INICIO DEL DOCUMENTO ===\n" + head)
@@ -617,6 +642,9 @@ def build_focus_context(text: str, contractor_name_rule: str, contractor_doc_rul
             f"numero_documento_contratista: {contractor_doc_rule}"
         )
 
+    if objeto_regla:
+        parts.append("=== OBJETO DETECTADO POR REGLAS ===\n" + cut_text(objeto_regla, 3000))
+
     if obligaciones_regla:
         parts.append("=== BLOQUE DETECTADO DE OBLIGACIONES ESPECÍFICAS ===\n" + cut_text(obligaciones_regla, 7000))
 
@@ -631,6 +659,7 @@ def extract_contract_fields_raw(client: OpenAI, text: str, filename: str, rule_c
         text=text,
         contractor_name_rule=rule_candidates.get("nombre_contratista", ""),
         contractor_doc_rule=rule_candidates.get("numero_documento_contratista", ""),
+        objeto_regla=rule_candidates.get("Objeto", ""),
         obligaciones_regla=rule_candidates.get("obligaciones_especificas", ""),
         supervisor_regla=rule_candidates.get("nombre_supervisor", ""),
     )
@@ -641,6 +670,7 @@ Analiza el siguiente documento contractual en español y devuelve SOLO JSON vál
 - Tipo_contrato
 - nombre_contratista
 - numero_documento_contratista
+- Objeto
 - obligaciones_especificas
 - nombre_supervisor
 
@@ -654,10 +684,11 @@ Reglas obligatorias:
 5. El valor "901508361" NO es el documento del contratista. Ese número corresponde al NIT base de ATENEA y debe evitarse.
 6. Si ves "901.508.361-4" o variantes, NO lo devuelvas como numero_documento_contratista.
 7. numero_documento_contratista debe quedar SOLO con dígitos.
-8. obligaciones_especificas debe conservar el texto del bloque, sin resumir.
-9. nombre_supervisor debe ser persona o cargo supervisor.
-10. Tipo de documento detectado: {doc_class}. Si el documento no es propiamente una minuta pero sí menciona con claridad al contratista, extrae esa información.
-11. Devuelve únicamente JSON válido, sin explicación, sin markdown.
+8. Objeto debe conservarse tal como aparece en la cláusula contractual, incluyendo códigos iniciales como "8029_..." si hacen parte del texto.
+9. obligaciones_especificas debe conservar el texto del bloque, sin resumir.
+10. nombre_supervisor debe ser persona o cargo supervisor.
+11. Tipo de documento detectado: {doc_class}. Si el documento no es propiamente una minuta pero sí menciona con claridad al contratista, extrae esa información.
+12. Devuelve únicamente JSON válido, sin explicación, sin markdown.
 
 Archivo: {filename}
 
@@ -792,6 +823,11 @@ def merge_results(rule_result: dict, ai_result: Optional[dict], ai_party_result:
         elif not result.get("numero_documento_contratista") and ai.get("numero_documento_contratista"):
             result["numero_documento_contratista"] = ai["numero_documento_contratista"]
 
+        objeto_reglas = result.get("Objeto", "")
+        objeto_ia = ai.get("Objeto", "")
+        if (not objeto_reglas and objeto_ia) or (objeto_ia and len(objeto_ia) > len(objeto_reglas) and len(objeto_reglas) < 80):
+            result["Objeto"] = normalize_nullable_text(objeto_ia)
+
         reglas_obl = result.get("obligaciones_especificas", "")
         ia_obl = ai.get("obligaciones_especificas", "")
         if len(reglas_obl) < 80 and ia_obl:
@@ -809,6 +845,7 @@ def merge_results(rule_result: dict, ai_result: Optional[dict], ai_party_result:
     if is_forbidden_contractor_number(result.get("numero_documento_contratista", "")):
         result["numero_documento_contratista"] = ""
 
+    result["Objeto"] = clean_objeto_text(result.get("Objeto", ""))
     result["obligaciones_especificas"] = clean_obligaciones_footer_noise(result.get("obligaciones_especificas", ""))
 
     return result
@@ -830,6 +867,7 @@ def process_single_pdf(pdf_bytes: bytes, filename: str, client: Optional[OpenAI]
         "Tipo_contrato": extract_contract_type(text),
         "nombre_contratista": contractor_name,
         "numero_documento_contratista": contractor_doc,
+        "Objeto": extract_objeto(raw_text or text),
         "obligaciones_especificas": extract_obligaciones_especificas(raw_text or text),
         "nombre_supervisor": extract_supervisor_name(text),
     }
@@ -925,9 +963,12 @@ def save_results_to_excel(data: List[Dict], output_path: Path) -> None:
     excel_columns = [
         "archivo",
         "numero_contrato",
+        "Tipo_contrato",
         "nombre_contratista",
         "numero_documento_contratista",
+        "Objeto",
         "obligaciones_especificas",
+        "nombre_supervisor",
     ]
     df = df[[c for c in excel_columns if c in df.columns]]
 
