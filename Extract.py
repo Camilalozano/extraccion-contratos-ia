@@ -23,7 +23,7 @@ except Exception:
 
 
 INPUT_ZIP_PATH = r""
-OUTPUT_EXCEL_PATH = r"D:\Users\Usuario\Documents\ArchivosExtraidos.xlsx"
+OUTPUT_EXCEL_FILENAME = "Contratos_Extraidos.xlsx"
 USE_AI = True
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
@@ -1011,20 +1011,21 @@ def prompt_zip_path(default_path: str = "") -> Path:
         return zip_path
 
 
-def prompt_output_path(default_path: str) -> Path:
+def prompt_output_path(default_dir: str = "") -> Path:
     while True:
-        print("\nIngresa la ruta completa del Excel de salida.")
-        print(f"Presiona Enter para usar la ruta por defecto: {default_path}")
-        user_input = input("Ruta del Excel de salida (.xlsx): ").strip().strip('"')
-        selected = user_input or default_path
+        print(f"\nIngresa la carpeta donde se guardará el archivo de salida '{OUTPUT_EXCEL_FILENAME}'.")
+        if default_dir:
+            print(f"Presiona Enter para usar la ruta por defecto: {default_dir}")
+        user_input = input("Ruta de la carpeta de salida: ").strip().strip('"')
+        selected = user_input or default_dir
         if not selected:
-            print("Debes escribir una ruta de salida.")
+            print("Debes escribir una carpeta de salida.")
             continue
-        output_path = Path(selected)
-        if output_path.suffix.lower() != ".xlsx":
-            print("La ruta de salida debe terminar en .xlsx")
+        output_dir = Path(selected)
+        if output_dir.exists() and not output_dir.is_dir():
+            print(f"La ruta no corresponde a una carpeta: {output_dir}")
             continue
-        return output_path
+        return output_dir / OUTPUT_EXCEL_FILENAME
 
 
 def ask_yes_no(message: str, default: bool = True) -> bool:
@@ -1044,7 +1045,7 @@ def main() -> None:
     if len(sys.argv) >= 3 and sys.argv[2].strip():
         output_path = Path(sys.argv[2].strip().strip('"'))
     else:
-        output_path = prompt_output_path(OUTPUT_EXCEL_PATH)
+        output_path = prompt_output_path()
 
     use_ai = ask_yes_no("¿Quieres usar IA para fortalecer la extracción?", default=USE_AI)
 
