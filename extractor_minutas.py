@@ -165,6 +165,36 @@ def normalize_contract_number_for_match(value: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(value).upper())
 
 
+def normalize_atenea_contract_number(value: str) -> str:
+    """
+    Normaliza números de contrato al formato estricto ATENEA-000-AAAA.
+    Ejemplos:
+    - ATENEA 396 2026 -> ATENEA-396-2026
+    - ATENEA_001_2022 -> ATENEA-001-2022
+    - ATENEA-7-2024 -> ATENEA-007-2024
+    """
+    if not value:
+        return ""
+
+    value = normalize_spaces(str(value)).upper()
+    value = value.replace("–", "-").replace("—", "-").replace("_", "-").replace("/", "-")
+    value = re.sub(r"\s+", "-", value)
+    value = re.sub(r"[^A-Z0-9-]", "-", value)
+    value = re.sub(r"-{2,}", "-", value).strip("-")
+
+    match = re.search(r"\bATENEA-?(\d{1,4})-?(20\d{2})\b", value, flags=re.IGNORECASE)
+    if not match:
+        return ""
+
+    consecutivo = match.group(1).zfill(3)
+    anio = match.group(2)
+    return f"ATENEA-{consecutivo}-{anio}"
+
+
+def is_valid_atenea_contract_number(value: str) -> bool:
+    return bool(re.fullmatch(r"ATENEA-\d{3,4}-20\d{2}", normalize_spaces(value or "").upper()))
+
+
 def is_forbidden_contractor_number(candidate: str) -> bool:
     c = only_digits(candidate)
     return c in FORBIDDEN_CONTRACTOR_NUMBERS
@@ -287,22 +317,51 @@ def classify_document(text: str, filename: str = "") -> str:
 # Extracción por reglas
 # =========================
 def extract_contract_number(text: str, filename: str = "") -> str:
-    patterns = [
-        r"(?:CONTRATO|CONVENIO)[^\n]{0,120}?No\.?\s*([A-Z0-9\-_/]+(?:\s*[-–]\s*\d{4})?)",
-        r"No\.?\s*(ATENEA\s*[-–]\s*\d+\s*[-–]\s*\d{4})",
-        r"(ATENEA\s*[-–]\s*\d+\s*[-–]\s*\d{4})",
-        r"(CO1PCCNTR\d+)",
-    ]
-    for pattern in patterns:
-        m = re.search(pattern, text, re.IGNORECASE)
-        if m:
-            value = re.sub(r"\s+", "", m.group(1)).replace("–", "-")
-            return value.strip(" .,:;\n\t")
-    m_file = re.search(r"(ATENEA[-_]\d+[-_]\d{4})", filename, re.IGNORECASE)
-    if m_file:
-        return m_file.group(1).replace("_", "-")
-    return ""
+    """
+    Extrae el número de contrato DIRECTAMENTE DEL DOCUMENTO, no del nombre del archivo.
 
+    Regla principal:
+    - El número debe tener formato ATENEA-000-AAAA.
+    - Siempre inicia con ATENEA.
+    - Luego tiene un separador, normalmente guion.
+    - Luego un consecutivo numérico de 1 a 4 dígitos, normalizado mínimo a 3 dígitos.
+    - Luego otro separador.
+    - Finaliza con año de 4 dígitos, normalmente 20XX.
+
+    La búsqueda se concentra al inicio del documento porque en las minutas el número aparece
+    en el encabezado/frase inicial, por ejemplo:
+    "CONTRATO DE PRESTACIÓN DE SERVICIOS PROFESIONALES No. ATENEA-396-2026 ..."
+    """
+    if not text:
+        return ""
+
+    clean_text = normalize_text(text)
+    head = clean_text[:6000]
+
+    patterns = [
+        # Caso más confiable: aparece después de CONTRATO/CONVENIO ... No.
+        r"(?:CONTRATO|CONVENIO)[^\n]{0,300}?N(?:o|°|º|ro|úmero)?\.?\s*(ATENEA\s*[-–—_\s/]?\s*\d{1,4}\s*[-–—_\s/]?\s*20\d{2})",
+        # Caso directo al inicio o en la primera página
+        r"\b(ATENEA\s*[-–—_\s/]?\s*\d{1,4}\s*[-–—_\s/]?\s*20\d{2})\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, head, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            normalized = normalize_atenea_contract_number(match.group(1))
+            if normalized:
+                return normalized
+
+    # Fallback sobre todo el documento, pero sigue siendo extracción desde el contenido,
+    # nunca desde el título del archivo.
+    for pattern in patterns:
+        match = re.search(pattern, clean_text, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            normalized = normalize_atenea_contract_number(match.group(1))
+            if normalized:
+                return normalized
+
+    return ""
 
 def extract_contract_type(text: str) -> str:
     patterns = [
@@ -754,7 +813,7 @@ def normalize_ai_result(data: dict) -> dict:
     data = data or {}
     normalized = {field: normalize_nullable_text(data.get(field, "")) for field in TARGET_FIELDS}
     normalized["numero_documento_contratista"] = only_digits(normalized.get("numero_documento_contratista"))
-    normalized["numero_contrato"] = normalized.get("numero_contrato", "").replace("–", "-")
+    normalized["numero_contrato"] = normalize_atenea_contract_number(normalized.get("numero_contrato", ""))
     if is_forbidden_contractor_number(normalized.get("numero_documento_contratista", "")):
         normalized["numero_documento_contratista"] = ""
     return normalized
@@ -806,9 +865,13 @@ def merge_results(rule_result: dict, ai_result: Optional[dict], ai_party_result:
             continue
         ai = normalize_ai_result(ai)
 
-        for field in ["numero_contrato", "Tipo_contrato"]:
-            if ai.get(field):
-                result[field] = ai[field]
+        # numero_contrato se prioriza desde reglas porque debe salir directamente del documento
+        # con regex estricta. La IA solo se usa si las reglas no encontraron un valor válido.
+        if not is_valid_atenea_contract_number(result.get("numero_contrato", "")) and is_valid_atenea_contract_number(ai.get("numero_contrato", "")):
+            result["numero_contrato"] = ai["numero_contrato"]
+
+        if ai.get("Tipo_contrato"):
+            result["Tipo_contrato"] = ai["Tipo_contrato"]
 
         if should_override_name(result.get("nombre_contratista", ""), ai.get("nombre_contratista", "")):
             result["nombre_contratista"] = ai["nombre_contratista"]
@@ -863,7 +926,7 @@ def process_single_pdf(pdf_bytes: bytes, filename: str, client: Optional[OpenAI]
     contractor_doc = extract_contractor_document(text, contractor_name)
 
     rule_result = {
-        "numero_contrato": extract_contract_number(text, filename),
+        "numero_contrato": extract_contract_number(raw_text or text, filename),
         "Tipo_contrato": extract_contract_type(text),
         "nombre_contratista": contractor_name,
         "numero_documento_contratista": contractor_doc,
